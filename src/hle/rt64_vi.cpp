@@ -175,7 +175,8 @@ namespace RT64 {
 
     uint32_t VIHistory::logicalRateFromFactors() {
         if ((factors[0] != 0) && std::all_of(factors.begin(), factors.end(), [&](uint32_t factor) { return factor == factors[0]; })) {
-            const uint32_t FullRate = 60; // TODO: PAL support.
+            // PAL modes have 625 half-lines per frame and refresh at 50 Hz; NTSC and MPAL have 525 at 60 Hz.
+            const uint32_t FullRate = (top().vi.vSync >= 600) ? 50 : 60;
             return FullRate / factors[0];
         }
         else {

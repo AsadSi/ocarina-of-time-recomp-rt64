@@ -9,6 +9,8 @@
 
 #include "xxHash/xxh3.h"
 
+#include <chrono>
+
 namespace RT64 {
     // GameFrame
     
@@ -369,6 +371,10 @@ namespace RT64 {
         matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
         matchScenes(orthographicScenes, prevFrame.orthographicScenes);
 
+        if (getenv("RT64_INTERP_STATS") != nullptr) {
+            logInterpolationStats(workloadQueue);
+        }
+
         if (!workloadsModified.empty()) {
             thread_local std::vector<BufferUploader::Upload> uploads;
             uploads.clear();
@@ -383,6 +389,66 @@ namespace RT64 {
         }
         else {
             velocityUploaderUsed = false;
+        }
+    }
+
+    // Debugging aid: with RT64_INTERP_STATS set, logs how this frame's perspective transforms were matched
+    // to the previous frame (by ID, automatically, or not at all), and about once a second the screen
+    // position of every non-identity transform that was left to automatic matching.
+    void GameFrame::logInterpolationStats(const WorkloadQueue &workloadQueue) const {
+        static uint32_t frameCounter = 0;
+        const double seconds = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const bool detail = (frameCounter++ % 17) == 0;
+        uint32_t idTotal = 0, idMapped = 0, autoTotal = 0, autoMapped = 0, ignored = 0;
+        std::string points;
+        std::set<std::pair<uint32_t, uint32_t>> seen;
+        for (const GameScene &scene : perspectiveScenes) {
+            for (const GameIndices::Projection &projIndices : scene.projections) {
+                const Workload &workload = workloadQueue.workloads[projIndices.workloadIndex];
+                const GameFrameMap::WorkloadMap &workloadMap = frameMap.workloads[projIndices.workloadIndex];
+                const Projection &proj = workload.fbPairs[projIndices.fbPairIndex].projections[projIndices.projectionIndex];
+                const hlslpp::float4x4 &viewProj = workload.drawData.viewProjTransforms[proj.transformsIndex];
+                for (uint32_t c = 0; c < proj.gameCallCount; c++) {
+                    const GameCall &call = proj.gameCalls[c];
+                    for (uint32_t m = call.callDesc.minWorldMatrix; m <= call.callDesc.maxWorldMatrix; m++) {
+                        if (!seen.emplace(projIndices.workloadIndex, m).second) {
+                            continue;
+                        }
+
+                        const TransformGroup &group = workload.drawData.transformGroups[workload.drawData.worldTransformGroups[m]];
+                        const bool mapped = (m < workloadMap.transforms.size()) && workloadMap.transforms[m].mapped;
+                        if (group.matrixId == G_EX_ID_IGNORE) {
+                            ignored++;
+                        }
+                        else if (group.matrixId != G_EX_ID_AUTO) {
+                            idTotal++;
+                            idMapped += mapped;
+                        }
+                        else {
+                            autoTotal++;
+                            autoMapped += mapped;
+                            const hlslpp::float4x4 &t = workload.drawData.worldTransforms[m];
+                            const bool identity = hlslpp::all(t[0] == hlslpp::float4(1, 0, 0, 0)) && hlslpp::all(t[1] == hlslpp::float4(0, 1, 0, 0)) &&
+                                hlslpp::all(t[2] == hlslpp::float4(0, 0, 1, 0)) && hlslpp::all(t[3] == hlslpp::float4(0, 0, 0, 1));
+                            if (detail && !identity) {
+                                hlslpp::float4 screen = hlslpp::mul(t[3], viewProj);
+                                if (fabs(screen.w) > 1e-6f) {
+                                    screen = screen / screen.w;
+                                }
+
+                                char point[48];
+                                snprintf(point, sizeof(point), " %.3f,%.3f,%d", float(screen.x), float(screen.y), mapped ? 1 : 0);
+                                points += point;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        fprintf(stderr, "[interp] t=%.2f id=%u/%u auto=%u/%u ignored=%u\n", seconds, idMapped, idTotal, autoMapped, autoTotal, ignored);
+        if (detail) {
+            fprintf(stderr, "[interp-auto] t=%.2f%s\n", seconds, points.c_str());
         }
     }
 
